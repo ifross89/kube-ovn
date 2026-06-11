@@ -228,20 +228,42 @@ func (s *Subnet) popPodNic(podName, nicName string) {
 }
 
 func (s *Subnet) GetRandomAddress(poolName, podName, nicName string, mac *string, skippedAddrs []string, checkConflict bool) (IP, IP, string, error) {
+	return s.GetRandomAddressWithIPFamily(poolName, podName, nicName, mac, skippedAddrs, checkConflict, "")
+}
+
+func (s *Subnet) GetRandomAddressWithIPFamily(poolName, podName, nicName string, mac *string, skippedAddrs []string, checkConflict bool, ipFamily string) (IP, IP, string, error) {
 	s.Mutex.Lock()
 	defer func() {
 		s.pushPodNic(podName, nicName)
 		s.Mutex.Unlock()
 	}()
+	if !isValidIPFamily(ipFamily) {
+		return nil, nil, "", ErrIPFamilyMismatch
+	}
 
 	switch s.Protocol {
 	case kubeovnv1.ProtocolMac:
 		return s.getMacOnlyAddress(podName, nicName, mac, checkConflict)
 	case kubeovnv1.ProtocolDual:
-		return s.getDualRandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
+		switch ipFamily {
+		case util.IPFamilyIPv4:
+			return s.getV4RandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
+		case util.IPFamilyIPv6:
+			return s.getV6RandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
+		case "":
+			return s.getDualRandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
+		default:
+			return nil, nil, "", ErrIPFamilyMismatch
+		}
 	case kubeovnv1.ProtocolIPv4:
+		if ipFamily == util.IPFamilyIPv6 {
+			return nil, nil, "", ErrIPFamilyMismatch
+		}
 		return s.getV4RandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
 	default:
+		if ipFamily == util.IPFamilyIPv4 {
+			return nil, nil, "", ErrIPFamilyMismatch
+		}
 		return s.getV6RandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
 	}
 }

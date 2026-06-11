@@ -16,6 +16,7 @@ import (
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	"github.com/kubeovn/kube-ovn/pkg/internal"
 	"github.com/kubeovn/kube-ovn/pkg/ipam"
+	"github.com/kubeovn/kube-ovn/pkg/ovs"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
@@ -769,6 +770,218 @@ func newIPAMForTest(subnets []*kubeovnv1.Subnet) *ipam.IPAM {
 		ipamInstance.Subnets[subnet.Name] = s
 	}
 	return ipamInstance
+}
+
+func TestAcquireAddressWithIPFamilyUsesSingleFamilyNamespaceIPPool(t *testing.T) {
+	subnet := &kubeovnv1.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "dual-subnet"},
+		Spec: kubeovnv1.SubnetSpec{
+			CIDRBlock: "10.0.0.0/24,2001:db8::/64",
+			Gateway:   "10.0.0.1,2001:db8::1",
+			Protocol:  kubeovnv1.ProtocolDual,
+			Provider:  util.OvnProvider,
+		},
+		Status: kubeovnv1.SubnetStatus{
+			V4AvailableIPs: internal.NewBigInt(1),
+			V6AvailableIPs: internal.NewBigInt(0),
+		},
+	}
+	ippool := &kubeovnv1.IPPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "v4-pool"},
+		Spec: kubeovnv1.IPPoolSpec{
+			Subnet: "dual-subnet",
+			IPs:    []string{"10.0.0.10"},
+		},
+		Status: kubeovnv1.IPPoolStatus{
+			V4AvailableIPs: internal.NewBigInt(1),
+			V6AvailableIPs: internal.NewBigInt(0),
+		},
+	}
+	namespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default",
+			Annotations: map[string]string{
+				util.LogicalSwitchAnnotation: "dual-subnet",
+				util.IPPoolAnnotation:        "v4-pool",
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod",
+			Namespace: "default",
+			Annotations: map[string]string{
+				util.IPFamilyAnnotation: util.IPFamilyIPv4,
+			},
+		},
+	}
+
+	fakeController, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+		Namespaces: []*corev1.Namespace{namespace},
+		Subnets:    []*kubeovnv1.Subnet{subnet},
+		IPPools:    []*kubeovnv1.IPPool{ippool},
+		Pods:       []*corev1.Pod{pod},
+	})
+	require.NoError(t, err)
+	controller := fakeController.fakeController
+	controller.ipam = newIPAMForTest([]*kubeovnv1.Subnet{subnet})
+	require.NoError(t, controller.ipam.AddOrUpdateIPPool("dual-subnet", "v4-pool", []string{"10.0.0.10"}))
+
+	podNets, err := controller.getPodKubeovnNets(pod)
+	require.NoError(t, err)
+	require.Len(t, podNets, 1)
+
+	v4IP, v6IP, _, allocatedSubnet, err := controller.acquireAddress(pod, podNets[0])
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.10", v4IP)
+	require.Empty(t, v6IP)
+	require.Equal(t, "dual-subnet", allocatedSubnet.Name)
+}
+
+func TestAcquireAddressWithIPFamilyFiltersVIP(t *testing.T) {
+	subnet := &kubeovnv1.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "dual-subnet"},
+		Spec: kubeovnv1.SubnetSpec{
+			CIDRBlock: "10.0.0.0/24,2001:db8::/64",
+			Protocol:  kubeovnv1.ProtocolDual,
+			Provider:  util.OvnProvider,
+		},
+	}
+	vip := &kubeovnv1.Vip{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "vip",
+			Labels: map[string]string{
+				util.IPReservedLabel: "",
+			},
+		},
+		Spec: kubeovnv1.VipSpec{
+			Namespace: "default",
+			Subnet:    "dual-subnet",
+		},
+		Status: kubeovnv1.VipStatus{
+			V4ip: "10.0.0.20",
+			V6ip: "2001:db8::20",
+			Mac:  "00:00:00:00:00:01",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod",
+			Namespace: "default",
+			Annotations: map[string]string{
+				util.VipAnnotation:      "vip",
+				util.IPFamilyAnnotation: util.IPFamilyIPv4,
+			},
+		},
+	}
+
+	fakeController, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+		Subnets: []*kubeovnv1.Subnet{subnet},
+		Vips:    []*kubeovnv1.Vip{vip},
+		Pods:    []*corev1.Pod{pod},
+	})
+	require.NoError(t, err)
+	controller := fakeController.fakeController
+	podNet := &kubeovnNet{
+		ProviderName: util.OvnProvider,
+		Subnet:       subnet,
+		IsDefault:    true,
+	}
+
+	v4IP, v6IP, mac, _, err := controller.acquireAddress(pod, podNet)
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.20", v4IP)
+	require.Empty(t, v6IP)
+	require.Equal(t, "00:00:00:00:00:01", mac)
+}
+
+func TestReconcilePodDHCPOptionsFiltersIPFamily(t *testing.T) {
+	tests := []struct {
+		family      string
+		cidr        string
+		dhcpOptions *ovs.DHCPOptionsUUIDs
+	}{
+		{
+			family: util.IPFamilyIPv4,
+			cidr:   "10.0.0.0/24",
+			dhcpOptions: &ovs.DHCPOptionsUUIDs{
+				DHCPv4OptionsUUID: "dhcp-v4",
+			},
+		},
+		{
+			family: util.IPFamilyIPv6,
+			cidr:   "2001:db8::/64",
+			dhcpOptions: &ovs.DHCPOptionsUUIDs{
+				DHCPv6OptionsUUID: "dhcp-v6",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.family, func(t *testing.T) {
+			subnet := &kubeovnv1.Subnet{
+				ObjectMeta: metav1.ObjectMeta{Name: "dual-subnet"},
+				Spec: kubeovnv1.SubnetSpec{
+					CIDRBlock: "10.0.0.0/24,2001:db8::/64",
+					Gateway:   "10.0.0.1,2001:db8::1",
+					Protocol:  kubeovnv1.ProtocolDual,
+					Provider:  util.OvnProvider,
+				},
+				Status: kubeovnv1.SubnetStatus{
+					DHCPv4OptionsUUID: "dhcp-v4",
+					DHCPv6OptionsUUID: "dhcp-v6",
+				},
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod",
+				Namespace: "default",
+				Annotations: map[string]string{
+					util.AllocatedAnnotation: "true",
+					util.IPFamilyAnnotation:  tt.family,
+				},
+			}}
+			fakeController, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+				Subnets: []*kubeovnv1.Subnet{subnet},
+				Pods:    []*corev1.Pod{pod},
+			})
+			require.NoError(t, err)
+			portName := "pod.default"
+			fakeController.mockOvnClient.EXPECT().ReconcilePortDHCPOptions(
+				subnet.Name,
+				portName,
+				tt.dhcpOptions,
+				tt.cidr,
+				"",
+				"",
+				"",
+				0,
+			).Return(tt.dhcpOptions, false, nil)
+
+			err = fakeController.fakeController.reconcilePodDHCPOptions(pod, []*kubeovnNet{{
+				Type:         providerTypeOriginal,
+				ProviderName: util.OvnProvider,
+				Subnet:       subnet,
+			}})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestIPFamilyNetworkConfig(t *testing.T) {
+	cidr := "10.0.0.0/24,2001:db8::/64"
+	gateway := "10.0.0.1,2001:db8::1"
+
+	gotCIDR, gotGateway := networkConfigForIPFamily(util.IPFamilyIPv4, cidr, gateway)
+	require.Equal(t, "10.0.0.0/24", gotCIDR)
+	require.Equal(t, "10.0.0.1", gotGateway)
+
+	gotCIDR, gotGateway = networkConfigForIPFamily(util.IPFamilyIPv6, cidr, gateway)
+	require.Equal(t, "2001:db8::/64", gotCIDR)
+	require.Equal(t, "2001:db8::1", gotGateway)
+
+	gotCIDR, gotGateway = networkConfigForIPFamily("", cidr, gateway)
+	require.Equal(t, cidr, gotCIDR)
+	require.Equal(t, gateway, gotGateway)
 }
 
 func TestGetNamedPortByNsReturnsCopy(t *testing.T) {

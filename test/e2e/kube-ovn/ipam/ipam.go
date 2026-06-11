@@ -112,6 +112,73 @@ var _ = framework.Describe("[group:ipam]", func() {
 		framework.ExpectConsistOf(util.PodIPs(*pod), strings.Split(ip, ","))
 	})
 
+	framework.ConformanceIt("should allocate only IPv4 for a restricted pod in a dual-stack subnet", func() {
+		if !f.IsDual() {
+			ginkgo.Skip("ip_family annotation only takes effect in dual-stack subnets")
+		}
+		f.SkipVersionPriorTo(1, 18, "Per-pod IP family restriction was introduced in v1.18")
+
+		annotations := map[string]string{util.IPFamilyAnnotation: util.IPFamilyIPv4}
+		pod := framework.MakePod(namespaceName, podName, nil, annotations, "", nil, nil)
+		pod = podClient.CreateSync(pod)
+
+		v4CIDR, _ := util.SplitStringIP(subnet.Spec.CIDRBlock)
+		v4Gateway, _ := util.SplitStringIP(subnet.Spec.Gateway)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.AllocatedAnnotation, "true")
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.CidrAnnotation, v4CIDR)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.GatewayAnnotation, v4Gateway)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.RoutedAnnotation, "true")
+
+		ip := pod.Annotations[util.IPAddressAnnotation]
+		framework.ExpectEqual(util.CheckProtocol(ip), apiv1.ProtocolIPv4)
+		framework.ExpectTrue(util.CIDRContainIP(v4CIDR, ip))
+		framework.ExpectConsistOf(util.PodIPs(*pod), []string{ip})
+	})
+
+	framework.ConformanceIt("should allocate only IPv6 for a restricted pod in a dual-stack subnet", func() {
+		if !f.IsDual() {
+			ginkgo.Skip("ip_family annotation only takes effect in dual-stack subnets")
+		}
+		f.SkipVersionPriorTo(1, 18, "Per-pod IP family restriction was introduced in v1.18")
+
+		annotations := map[string]string{util.IPFamilyAnnotation: util.IPFamilyIPv6}
+		pod := framework.MakePod(namespaceName, podName, nil, annotations, "", nil, nil)
+		pod = podClient.CreateSync(pod)
+
+		_, v6CIDR := util.SplitStringIP(subnet.Spec.CIDRBlock)
+		_, v6Gateway := util.SplitStringIP(subnet.Spec.Gateway)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.AllocatedAnnotation, "true")
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.CidrAnnotation, v6CIDR)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.GatewayAnnotation, v6Gateway)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.RoutedAnnotation, "true")
+
+		ip := pod.Annotations[util.IPAddressAnnotation]
+		framework.ExpectEqual(util.CheckProtocol(ip), apiv1.ProtocolIPv6)
+		framework.ExpectTrue(util.CIDRContainIP(v6CIDR, ip))
+		framework.ExpectConsistOf(util.PodIPs(*pod), []string{ip})
+	})
+
+	framework.ConformanceIt("should allocate a static IP matching the pod IP family restriction", func() {
+		if !f.IsDual() {
+			ginkgo.Skip("ip_family annotation only takes effect in dual-stack subnets")
+		}
+		f.SkipVersionPriorTo(1, 18, "Per-pod IP family restriction was introduced in v1.18")
+
+		v4CIDR, _ := util.SplitStringIP(subnet.Spec.CIDRBlock)
+		ip := framework.RandomIPs(v4CIDR, ";", 1)
+		annotations := map[string]string{
+			util.IPAddressAnnotation: ip,
+			util.IPFamilyAnnotation:  util.IPFamilyIPv4,
+		}
+		pod := framework.MakePod(namespaceName, podName, nil, annotations, "", nil, nil)
+		pod = podClient.CreateSync(pod)
+
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.AllocatedAnnotation, "true")
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.IPAddressAnnotation, ip)
+		framework.ExpectHaveKeyWithValue(pod.Annotations, util.CidrAnnotation, v4CIDR)
+		framework.ExpectConsistOf(util.PodIPs(*pod), []string{ip})
+	})
+
 	framework.ConformanceIt("should allocate static ip for pod with comma separated ippool", func() {
 		if f.IsDual() {
 			ginkgo.Skip("Comma separated ippool is not supported for dual stack")

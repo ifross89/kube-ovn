@@ -397,6 +397,18 @@ func GetIPWithoutMask(ipStr string) string {
 	return strings.Join(ips, ",")
 }
 
+// IPFamilyOf returns the ip family ("ipv4" or "ipv6") of the given address(es),
+// or an empty string for dual-stack or invalid input.
+func IPFamilyOf(ipStr string) string {
+	switch CheckProtocol(ipStr) {
+	case kubeovnv1.ProtocolIPv4:
+		return IPFamilyIPv4
+	case kubeovnv1.ProtocolIPv6:
+		return IPFamilyIPv6
+	}
+	return ""
+}
+
 func SplitStringIP(ipStr string) (string, string) {
 	var v4IP, v6IP string
 	switch CheckProtocol(ipStr) {

@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
+	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
 func TestNewIPAM(t *testing.T) {
@@ -1122,4 +1123,99 @@ func TestGetSubnetV4Mask(t *testing.T) {
 	mask, err = ipam.GetSubnetV4Mask(nonExistSubnetName)
 	require.Equal(t, err, ErrNoAvailable)
 	require.Empty(t, mask)
+}
+
+func TestIPFamilyRestriction(t *testing.T) {
+	newDualIPAM := func(t *testing.T) (*IPAM, *Subnet) {
+		t.Helper()
+		ipam := NewIPAM()
+		subnet, err := NewSubnet("dual", "10.0.0.0/24,2001:db8::/64", nil)
+		require.NoError(t, err)
+		ipam.Subnets[subnet.Name] = subnet
+		return ipam, subnet
+	}
+
+	t.Run("random allocation uses only requested family", func(t *testing.T) {
+		tests := []struct {
+			family string
+			wantV4 bool
+		}{
+			{family: util.IPFamilyIPv4, wantV4: true},
+			{family: util.IPFamilyIPv6},
+		}
+		for _, tt := range tests {
+			t.Run(tt.family, func(t *testing.T) {
+				ipam, subnet := newDualIPAM(t)
+				v4, v6, mac, err := ipam.GetRandomAddressWithIPFamily("pod", "nic", nil, subnet.Name, "", nil, true, tt.family)
+				require.NoError(t, err)
+				require.NotEmpty(t, mac)
+				if tt.wantV4 {
+					require.NotEmpty(t, v4)
+					require.Empty(t, v6)
+					require.Zero(t, subnet.V6Using.Len())
+				} else {
+					require.Empty(t, v4)
+					require.NotEmpty(t, v6)
+					require.Zero(t, subnet.V4Using.Len())
+				}
+			})
+		}
+	})
+
+	t.Run("invalid family is rejected before allocation", func(t *testing.T) {
+		ipam, subnet := newDualIPAM(t)
+		_, _, _, err := ipam.GetRandomAddressWithIPFamily("pod", "nic", nil, subnet.Name, "", nil, true, "dual")
+		require.ErrorIs(t, err, ErrIPFamilyMismatch)
+		require.Zero(t, subnet.V4Using.Len())
+		require.Zero(t, subnet.V6Using.Len())
+	})
+
+	t.Run("static allocation uses only requested family", func(t *testing.T) {
+		ipam, subnet := newDualIPAM(t)
+		v4, v6, _, err := ipam.GetStaticAddressWithIPFamily("pod-v4", "nic-v4", "10.0.0.10", nil, subnet.Name, true, util.IPFamilyIPv4)
+		require.NoError(t, err)
+		require.Equal(t, "10.0.0.10", v4)
+		require.Empty(t, v6)
+
+		v4, v6, _, err = ipam.GetStaticAddressWithIPFamily("pod-v6", "nic-v6", "2001:db8::10", nil, subnet.Name, true, util.IPFamilyIPv6)
+		require.NoError(t, err)
+		require.Empty(t, v4)
+		require.Equal(t, "2001:db8::10", v6)
+	})
+
+	t.Run("static mismatch does not partially allocate", func(t *testing.T) {
+		ipam, subnet := newDualIPAM(t)
+		_, _, _, err := ipam.GetStaticAddressWithIPFamily("pod", "nic", "10.0.0.12,2001:db8::12", nil, subnet.Name, true, util.IPFamilyIPv4)
+		require.ErrorIs(t, err, ErrIPFamilyMismatch)
+		require.Zero(t, subnet.V4Using.Len())
+		require.Zero(t, subnet.V6Using.Len())
+	})
+
+	t.Run("unrestricted API retains dual-stack behavior", func(t *testing.T) {
+		ipam, subnet := newDualIPAM(t)
+		v4, v6, _, err := ipam.GetStaticAddress("pod", "nic", "10.0.0.13", nil, subnet.Name, true)
+		require.NoError(t, err)
+		require.Equal(t, "10.0.0.13", v4)
+		require.NotEmpty(t, v6)
+	})
+
+	t.Run("restore preserves recorded family", func(t *testing.T) {
+		ipam, subnet := newDualIPAM(t)
+		recordedIP := "2001:db8::20"
+		v4, v6, _, err := ipam.GetStaticAddressWithIPFamily("pod", "nic", recordedIP, nil, subnet.Name, true, util.IPFamilyOf(recordedIP))
+		require.NoError(t, err)
+		require.Empty(t, v4)
+		require.Equal(t, recordedIP, v6)
+		require.Zero(t, subnet.V4Using.Len())
+	})
+
+	t.Run("single-stack mismatch is rejected", func(t *testing.T) {
+		ipam := NewIPAM()
+		subnet, err := NewSubnet("v4", "10.1.0.0/24", nil)
+		require.NoError(t, err)
+		ipam.Subnets[subnet.Name] = subnet
+
+		_, _, _, err = ipam.GetRandomAddressWithIPFamily("pod", "nic", nil, subnet.Name, "", nil, true, util.IPFamilyIPv6)
+		require.ErrorIs(t, err, ErrIPFamilyMismatch)
+	})
 }

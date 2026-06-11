@@ -111,7 +111,7 @@ func (v *ValidatingHook) PodCreateHook(ctx context.Context, req admission.Reques
 
 	staticIP := o.GetAnnotations()[util.IPAddressAnnotation]
 	klog.V(3).Infof("%s %s@%s, ip_address: %s", o.Kind, o.GetName(), o.GetNamespace(), staticIP)
-	if staticIP == "" && poolAnno == "" {
+	if staticIP == "" && poolAnno == "" && o.GetAnnotations()[util.IPFamilyAnnotation] == "" {
 		return ctrlwebhook.Allowed("bypass")
 	}
 	if v.allowLiveMigration(o.GetAnnotations()) {

@@ -1021,6 +1021,13 @@ func TestValidatePodNetwork(t *testing.T) {
 			err: "",
 		},
 		{
+			name: "ipFamilyIPv4",
+			annotations: map[string]string{
+				IPFamilyAnnotation: IPFamilyIPv4,
+			},
+			err: "",
+		},
+		{
 			name: "IngressBurstNotNumber",
 			annotations: map[string]string{
 				IPAddressAnnotation:    "10.16.0.15",
@@ -1061,6 +1068,44 @@ func TestValidatePodNetwork(t *testing.T) {
 				"net1.ns1.kubernetes.io/egress_rate": "10m",
 			},
 			err: "10m is not a valid net1.ns1.kubernetes.io/egress_rate",
+		},
+		{
+			name: "ipFamilyIPv6",
+			annotations: map[string]string{
+				IPFamilyAnnotation: IPFamilyIPv6,
+			},
+			err: "",
+		},
+		{
+			name: "ipFamilyInvalid",
+			annotations: map[string]string{
+				IPFamilyAnnotation: "dual",
+			},
+			err: "\"dual\" is not a valid " + IPFamilyAnnotation,
+		},
+		{
+			name: "ipFamilyMatchesStaticIP",
+			annotations: map[string]string{
+				IPAddressAnnotation: "10.16.0.15",
+				IPFamilyAnnotation:  IPFamilyIPv4,
+			},
+			err: "",
+		},
+		{
+			name: "ipFamilyConflictsStaticIP",
+			annotations: map[string]string{
+				IPAddressAnnotation: "10.16.0.15",
+				IPFamilyAnnotation:  IPFamilyIPv6,
+			},
+			err: "ip address 10.16.0.15 conflicts with " + IPFamilyAnnotation + " " + IPFamilyIPv6,
+		},
+		{
+			name: "ipFamilyConflictsDualStaticIP",
+			annotations: map[string]string{
+				IPAddressAnnotation: "10.16.0.15,fd00:10:16::15",
+				IPFamilyAnnotation:  IPFamilyIPv4,
+			},
+			err: "ip address fd00:10:16::15 conflicts with " + IPFamilyAnnotation + " " + IPFamilyIPv4,
 		},
 	}
 	for _, tt := range tests {

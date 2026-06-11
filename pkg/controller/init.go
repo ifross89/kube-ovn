@@ -460,7 +460,7 @@ func (c *Controller) InitIPAM() error {
 		} else {
 			ipamKey = util.NodeLspName(ip.Spec.PodName)
 		}
-		if _, _, _, err = c.ipam.GetStaticAddress(ipamKey, ip.Name, ip.Spec.IPAddress, &ip.Spec.MacAddress, ip.Spec.Subnet, true); err != nil {
+		if _, _, _, err = c.ipam.GetStaticAddressWithIPFamily(ipamKey, ip.Name, ip.Spec.IPAddress, &ip.Spec.MacAddress, ip.Spec.Subnet, true, util.IPFamilyOf(ip.Spec.IPAddress)); err != nil {
 			klog.Errorf("failed to init IPAM from IP CR %s: %v", ip.Name, err)
 		}
 	}
@@ -504,7 +504,7 @@ func (c *Controller) InitIPAM() error {
 					klog.Warningf("pod %s/%s has empty IP annotation for provider %s, skip IPAM init", pod.Namespace, podName, podNet.ProviderName)
 					continue
 				}
-				_, _, _, err := c.ipam.GetStaticAddress(key, portName, ip, &mac, podNet.Subnet.Name, true)
+				_, _, _, err := c.ipam.GetStaticAddressWithIPFamily(key, portName, ip, &mac, podNet.Subnet.Name, true, util.IPFamilyOf(ip))
 				if err != nil {
 					klog.Errorf("failed to init pod %s.%s address %s: %v", podName, pod.Namespace, ip, err)
 				} else {
