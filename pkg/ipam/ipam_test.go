@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
 func TestNewIPAM(t *testing.T) {
@@ -981,4 +983,65 @@ func TestGetSubnetV4Mask(t *testing.T) {
 	mask, err = ipam.GetSubnetV4Mask(nonExistSubnetName)
 	require.Equal(t, err, ErrNoAvailable)
 	require.Empty(t, mask)
+}
+
+func TestIPFamilyRestriction(t *testing.T) {
+	ipam := NewIPAM()
+	dualSubnetName := "dualSubnet"
+	dualSubnet, err := NewSubnet(dualSubnetName, "10.0.0.0/24,2001:db8::/64", nil)
+	require.NoError(t, err)
+	ipam.Subnets[dualSubnetName] = dualSubnet
+
+	// random allocation restricted to ipv4 must not consume a v6 address
+	v4, v6, macStr, err := ipam.GetRandomAddress("pod1.default", "pod1.default", nil, dualSubnetName, "", nil, true, util.IPFamilyIPv4)
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.1", v4)
+	require.Empty(t, v6)
+	require.NotEmpty(t, macStr)
+	require.Equal(t, 0, dualSubnet.V6Using.Len())
+
+	// random allocation restricted to ipv6 must not consume a v4 address
+	v4, v6, macStr, err = ipam.GetRandomAddress("pod2.default", "pod2.default", nil, dualSubnetName, "", nil, true, util.IPFamilyIPv6)
+	require.NoError(t, err)
+	require.Empty(t, v4)
+	require.Equal(t, "2001:db8::1", v6)
+	require.NotEmpty(t, macStr)
+
+	// static v6 address restricted to ipv6 must be returned as v6, not v4
+	v4, v6, _, err = ipam.GetStaticAddress("pod3.default", "pod3.default", "2001:db8::10", nil, dualSubnetName, true, util.IPFamilyIPv6)
+	require.NoError(t, err)
+	require.Empty(t, v4)
+	require.Equal(t, "2001:db8::10", v6)
+
+	// static v4 address restricted to ipv4
+	v4, v6, _, err = ipam.GetStaticAddress("pod4.default", "pod4.default", "10.0.0.10", nil, dualSubnetName, true, util.IPFamilyIPv4)
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.10", v4)
+	require.Empty(t, v6)
+
+	// static address of the other family must be rejected
+	_, _, _, err = ipam.GetStaticAddress("pod5.default", "pod5.default", "10.0.0.11", nil, dualSubnetName, true, util.IPFamilyIPv6)
+	require.ErrorIs(t, err, ErrIPFamilyMismatch)
+
+	// dual static addresses conflict with a single family restriction
+	_, _, _, err = ipam.GetStaticAddress("pod6.default", "pod6.default", "10.0.0.12,2001:db8::12", nil, dualSubnetName, true, util.IPFamilyIPv4)
+	require.ErrorIs(t, err, ErrIPFamilyMismatch)
+
+	// without a family restriction the other family is still auto-allocated
+	v4, v6, _, err = ipam.GetStaticAddress("pod7.default", "pod7.default", "10.0.0.13", nil, dualSubnetName, true, "")
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.13", v4)
+	require.NotEmpty(t, v6)
+
+	// family restriction conflicting with a single-stack subnet must be rejected
+	v4SubnetName := "v4Subnet"
+	v4Subnet, err := NewSubnet(v4SubnetName, "10.1.0.0/24", nil)
+	require.NoError(t, err)
+	ipam.Subnets[v4SubnetName] = v4Subnet
+	_, _, _, err = ipam.GetRandomAddress("pod8.default", "pod8.default", nil, v4SubnetName, "", nil, true, util.IPFamilyIPv6)
+	require.ErrorIs(t, err, ErrIPFamilyMismatch)
+	v4, v6, _, err = ipam.GetRandomAddress("pod8.default", "pod8.default", nil, v4SubnetName, "", nil, true, util.IPFamilyIPv4)
+	require.NoError(t, err)
+	require.Equal(t, "10.1.0.1", v4)
+	require.Empty(t, v6)
 }

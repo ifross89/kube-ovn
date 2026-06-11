@@ -16,11 +16,12 @@ import (
 )
 
 var (
-	ErrOutOfRange  = errors.New("AddressOutOfRange")
-	ErrConflict    = errors.New("AddressConflict")
-	ErrNoAvailable = errors.New("NoAvailableAddress")
-	ErrNoSubnet    = errors.New("NoSubnet")
-	ErrInvalidCIDR = errors.New("CIDRInvalid")
+	ErrOutOfRange       = errors.New("AddressOutOfRange")
+	ErrConflict         = errors.New("AddressConflict")
+	ErrNoAvailable      = errors.New("NoAvailableAddress")
+	ErrNoSubnet         = errors.New("NoSubnet")
+	ErrInvalidCIDR      = errors.New("CIDRInvalid")
+	ErrIPFamilyMismatch = errors.New("IPFamilyMismatch")
 )
 
 type IPAM struct {
@@ -85,6 +86,10 @@ func (ipam *IPAM) GetStaticAddress(podName, nicName, ip string, mac *string, sub
 			klog.Errorf("failed to parse ip %s", ipStr)
 			return "", "", "", err
 		}
+		if ipFamily != "" && util.IPFamilyOf(ipStr) != ipFamily {
+			klog.Errorf("static ip %s does not match the requested ip family %s for %s", ipStr, ipFamily, podName)
+			return "", "", "", ErrIPFamilyMismatch
+		}
 		ipAddr, macStr, err = subnet.GetStaticAddress(podName, nicName, ip, mac, false, checkConflict)
 		if err != nil {
 			klog.Errorf("failed to allocate static ip %s for %s", ipStr, podName)
@@ -106,11 +111,16 @@ func (ipam *IPAM) GetStaticAddress(podName, nicName, ip string, mac *string, sub
 		klog.Infof("allocate v6 %s, mac %s for %s from subnet %s", ip, macStr, podName, subnetName)
 		return "", ip, macStr, err
 	case kubeovnv1.ProtocolDual:
-		if len(ips) > 0 && ips[0] != nil {
-			v4 = ips[0].String()
-		}
-		if len(ips) > 1 && ips[1] != nil {
-			v6 = ips[1].String()
+		for _, ipAddr := range ips {
+			if ipAddr == nil {
+				continue
+			}
+			switch util.CheckProtocol(ipAddr.String()) {
+			case kubeovnv1.ProtocolIPv4:
+				v4 = ipAddr.String()
+			case kubeovnv1.ProtocolIPv6:
+				v6 = ipAddr.String()
+			}
 		}
 		klog.Infof("allocate v4 %s, v6 %s, mac %s for %s from subnet %s", v4, v6, macStr, podName, subnetName)
 		return v4, v6, macStr, err

@@ -867,6 +867,51 @@ func TestValidatePodNetwork(t *testing.T) {
 			},
 			err: "a1 is not a valid " + EgressRateAnnotation,
 		},
+		{
+			name: "ipFamilyIPv4",
+			annotations: map[string]string{
+				IPFamilyAnnotation: IPFamilyIPv4,
+			},
+			err: "",
+		},
+		{
+			name: "ipFamilyIPv6",
+			annotations: map[string]string{
+				IPFamilyAnnotation: IPFamilyIPv6,
+			},
+			err: "",
+		},
+		{
+			name: "ipFamilyInvalid",
+			annotations: map[string]string{
+				IPFamilyAnnotation: "dual",
+			},
+			err: "\"dual\" is not a valid " + IPFamilyAnnotation,
+		},
+		{
+			name: "ipFamilyMatchesStaticIP",
+			annotations: map[string]string{
+				IPAddressAnnotation: "10.16.0.15",
+				IPFamilyAnnotation:  IPFamilyIPv4,
+			},
+			err: "",
+		},
+		{
+			name: "ipFamilyConflictsStaticIP",
+			annotations: map[string]string{
+				IPAddressAnnotation: "10.16.0.15",
+				IPFamilyAnnotation:  IPFamilyIPv6,
+			},
+			err: "ip address 10.16.0.15 conflicts with " + IPFamilyAnnotation + " " + IPFamilyIPv6,
+		},
+		{
+			name: "ipFamilyConflictsDualStaticIP",
+			annotations: map[string]string{
+				IPAddressAnnotation: "10.16.0.15,fd00:10:16::15",
+				IPFamilyAnnotation:  IPFamilyIPv4,
+			},
+			err: "ip address fd00:10:16::15 conflicts with " + IPFamilyAnnotation + " " + IPFamilyIPv4,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

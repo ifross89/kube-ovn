@@ -416,7 +416,10 @@ func (c *Controller) InitIPAM() error {
 		} else {
 			ipamKey = util.NodeLspName(ip.Spec.PodName)
 		}
-		if _, _, _, err = c.ipam.GetStaticAddress(ipamKey, ip.Name, ip.Spec.IPAddress, &ip.Spec.MacAddress, ip.Spec.Subnet, true, ""); err != nil {
+		// restore exactly what is recorded in the IP CR: a single-family record in a
+		// dual-stack subnet is legitimate when the pod restricts its ip family, and
+		// no address of the other family must be allocated for it
+		if _, _, _, err = c.ipam.GetStaticAddress(ipamKey, ip.Name, ip.Spec.IPAddress, &ip.Spec.MacAddress, ip.Spec.Subnet, true, util.IPFamilyOf(ip.Spec.IPAddress)); err != nil {
 			klog.Errorf("failed to init IPAM from IP CR %s: %v", ip.Name, err)
 		}
 	}
@@ -452,7 +455,9 @@ func (c *Controller) InitIPAM() error {
 				portName := ovs.PodNameToPortName(podName, pod.Namespace, podNet.ProviderName)
 				ip := pod.Annotations[fmt.Sprintf(util.IPAddressAnnotationTemplate, podNet.ProviderName)]
 				mac := pod.Annotations[fmt.Sprintf(util.MacAddressAnnotationTemplate, podNet.ProviderName)]
-				_, _, _, err := c.ipam.GetStaticAddress(key, portName, ip, &mac, podNet.Subnet.Name, true, "")
+				// derive the ip family from the recorded address rather than the pod's
+				// ip_family annotation so that restore never allocates a new address
+				_, _, _, err := c.ipam.GetStaticAddress(key, portName, ip, &mac, podNet.Subnet.Name, true, util.IPFamilyOf(ip))
 				if err != nil {
 					klog.Errorf("failed to init pod %s.%s address %s: %v", podName, pod.Namespace, pod.Annotations[fmt.Sprintf(util.IPAddressAnnotationTemplate, podNet.ProviderName)], err)
 				} else {

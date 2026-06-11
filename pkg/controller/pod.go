@@ -581,8 +581,19 @@ func (c *Controller) reconcileAllocateSubnets(pod *v1.Pod, needAllocatePodNets [
 		} else {
 			patch[fmt.Sprintf(util.MacAddressAnnotationTemplate, podNet.ProviderName)] = mac
 		}
-		patch[fmt.Sprintf(util.CidrAnnotationTemplate, podNet.ProviderName)] = subnet.Spec.CIDRBlock
-		patch[fmt.Sprintf(util.GatewayAnnotationTemplate, podNet.ProviderName)] = subnet.Spec.Gateway
+		// the CNI server pairs the pod's ip, cidr and gateway annotations by ip family,
+		// so they must be filtered to the restricted family together
+		cidrBlock, gateway := subnet.Spec.CIDRBlock, subnet.Spec.Gateway
+		switch pod.Annotations[util.IPFamilyAnnotation] {
+		case util.IPFamilyIPv4:
+			cidrBlock, _ = util.SplitStringIP(cidrBlock)
+			gateway, _ = util.SplitStringIP(gateway)
+		case util.IPFamilyIPv6:
+			_, cidrBlock = util.SplitStringIP(cidrBlock)
+			_, gateway = util.SplitStringIP(gateway)
+		}
+		patch[fmt.Sprintf(util.CidrAnnotationTemplate, podNet.ProviderName)] = cidrBlock
+		patch[fmt.Sprintf(util.GatewayAnnotationTemplate, podNet.ProviderName)] = gateway
 		if isOvnSubnet(podNet.Subnet) {
 			patch[fmt.Sprintf(util.LogicalSwitchAnnotationTemplate, podNet.ProviderName)] = subnet.Name
 			if pod.Annotations[fmt.Sprintf(util.PodNicAnnotationTemplate, podNet.ProviderName)] == "" {
@@ -638,9 +649,9 @@ func (c *Controller) reconcileAllocateSubnets(pod *v1.Pod, needAllocatePodNets [
 				DHCPv6OptionsUUID: subnet.Status.DHCPv6OptionsUUID,
 			}
 			switch pod.Annotations[util.IPFamilyAnnotation] {
-			case "ipv4":
+			case util.IPFamilyIPv4:
 				dhcpOptions.DHCPv6OptionsUUID = ""
-			case "ipv6":
+			case util.IPFamilyIPv6:
 				dhcpOptions.DHCPv4OptionsUUID = ""
 			}
 

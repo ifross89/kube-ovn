@@ -205,8 +205,14 @@ func (s *Subnet) GetRandomAddress(poolName, podName, nicName string, mac *string
 			return s.getDualRandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
 		}
 	case kubeovnv1.ProtocolIPv4:
+		if ipFamily == util.IPFamilyIPv6 {
+			return nil, nil, "", ErrIPFamilyMismatch
+		}
 		return s.getV4RandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
 	default:
+		if ipFamily == util.IPFamilyIPv4 {
+			return nil, nil, "", ErrIPFamilyMismatch
+		}
 		return s.getV6RandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
 	}
 }
