@@ -637,6 +637,12 @@ func (c *Controller) reconcileAllocateSubnets(pod *v1.Pod, needAllocatePodNets [
 				DHCPv4OptionsUUID: subnet.Status.DHCPv4OptionsUUID,
 				DHCPv6OptionsUUID: subnet.Status.DHCPv6OptionsUUID,
 			}
+			switch pod.Annotations[util.IPFamilyAnnotation] {
+			case "ipv4":
+				dhcpOptions.DHCPv6OptionsUUID = ""
+			case "ipv6":
+				dhcpOptions.DHCPv4OptionsUUID = ""
+			}
 
 			var oldSgList []string
 			if vmKey != "" {
@@ -2068,7 +2074,7 @@ func (c *Controller) acquireAddress(pod *v1.Pod, podNet *kubeovnNet) (string, st
 		ippoolStr == "" {
 		var skippedAddrs []string
 		for {
-			ipv4, ipv6, mac, err := c.ipam.GetRandomAddress(key, portName, macPointer, podNet.Subnet.Name, "", skippedAddrs, !podNet.AllowLiveMigration)
+			ipv4, ipv6, mac, err := c.ipam.GetRandomAddress(key, portName, macPointer, podNet.Subnet.Name, "", skippedAddrs, !podNet.AllowLiveMigration, pod.Annotations[util.IPFamilyAnnotation])
 			if err != nil {
 				klog.Error(err)
 				return "", "", "", podNet.Subnet, err
@@ -2104,7 +2110,7 @@ func (c *Controller) acquireAddress(pod *v1.Pod, podNet *kubeovnNet) (string, st
 	// Static allocate
 	if ipStr := pod.Annotations[fmt.Sprintf(util.IPAddressAnnotationTemplate, podNet.ProviderName)]; ipStr != "" {
 		for _, net := range nsNets {
-			v4IP, v6IP, mac, err = c.acquireStaticAddress(key, portName, ipStr, macPointer, net.Subnet.Name, net.AllowLiveMigration)
+			v4IP, v6IP, mac, err = c.acquireStaticAddress(key, portName, ipStr, macPointer, net.Subnet.Name, net.AllowLiveMigration, pod.Annotations[util.IPFamilyAnnotation])
 			if err == nil {
 				return v4IP, v6IP, mac, net.Subnet, nil
 			}
@@ -2135,7 +2141,7 @@ func (c *Controller) acquireAddress(pod *v1.Pod, podNet *kubeovnNet) (string, st
 				return "", "", "", podNet.Subnet, err
 			}
 			for {
-				ipv4, ipv6, mac, err := c.ipam.GetRandomAddress(key, portName, macPointer, pool.Spec.Subnet, ipPool[0], skippedAddrs, !podNet.AllowLiveMigration)
+				ipv4, ipv6, mac, err := c.ipam.GetRandomAddress(key, portName, macPointer, pool.Spec.Subnet, ipPool[0], skippedAddrs, !podNet.AllowLiveMigration, pod.Annotations[util.IPFamilyAnnotation])
 				if err != nil {
 					klog.Error(err)
 					return "", "", "", podNet.Subnet, err
@@ -2174,7 +2180,7 @@ func (c *Controller) acquireAddress(pod *v1.Pod, podNet *kubeovnNet) (string, st
 						continue
 					}
 
-					v4IP, v6IP, mac, err = c.acquireStaticAddress(key, portName, staticIP, macPointer, net.Subnet.Name, net.AllowLiveMigration)
+					v4IP, v6IP, mac, err = c.acquireStaticAddress(key, portName, staticIP, macPointer, net.Subnet.Name, net.AllowLiveMigration, pod.Annotations[util.IPFamilyAnnotation])
 					if err == nil {
 						return v4IP, v6IP, mac, net.Subnet, nil
 					}
@@ -2188,7 +2194,7 @@ func (c *Controller) acquireAddress(pod *v1.Pod, podNet *kubeovnNet) (string, st
 
 			if index < len(ipPool) {
 				for _, net := range nsNets {
-					v4IP, v6IP, mac, err = c.acquireStaticAddress(key, portName, ipPool[index], macPointer, net.Subnet.Name, net.AllowLiveMigration)
+					v4IP, v6IP, mac, err = c.acquireStaticAddress(key, portName, ipPool[index], macPointer, net.Subnet.Name, net.AllowLiveMigration, pod.Annotations[util.IPFamilyAnnotation])
 					if err == nil {
 						return v4IP, v6IP, mac, net.Subnet, nil
 					}
@@ -2201,7 +2207,7 @@ func (c *Controller) acquireAddress(pod *v1.Pod, podNet *kubeovnNet) (string, st
 	return "", "", "", podNet.Subnet, ipam.ErrNoAvailable
 }
 
-func (c *Controller) acquireStaticAddress(key, nicName, ip string, mac *string, subnet string, liveMigration bool) (string, string, string, error) {
+func (c *Controller) acquireStaticAddress(key, nicName, ip string, mac *string, subnet string, liveMigration bool, ipFamily string) (string, string, string, error) {
 	var v4IP, v6IP, macStr string
 	var err error
 	for ipStr := range strings.SplitSeq(ip, ",") {
@@ -2210,7 +2216,7 @@ func (c *Controller) acquireStaticAddress(key, nicName, ip string, mac *string, 
 		}
 	}
 
-	if v4IP, v6IP, macStr, err = c.ipam.GetStaticAddress(key, nicName, ip, mac, subnet, !liveMigration); err != nil {
+	if v4IP, v6IP, macStr, err = c.ipam.GetStaticAddress(key, nicName, ip, mac, subnet, !liveMigration, ipFamily); err != nil {
 		klog.Errorf("failed to get static ip %v, mac %v, subnet %v, err %v", ip, mac, subnet, err)
 		return "", "", "", err
 	}

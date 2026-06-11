@@ -349,6 +349,12 @@ func ValidatePodNetwork(annotations map[string]string) error {
 		}
 	}
 
+	if ipFamily := annotations[IPFamilyAnnotation]; ipFamily != "" {
+		if ipFamily != IPFamilyIPv4 && ipFamily != IPFamilyIPv6 {
+			errors = append(errors, fmt.Errorf("%q is not a valid %s, must be ipv4 or ipv6", ipFamily, IPFamilyAnnotation))
+		}
+	}
+
 	return utilerrors.NewAggregate(errors)
 }
 

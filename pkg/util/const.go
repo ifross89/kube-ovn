@@ -31,6 +31,9 @@ const (
 	ChassisAnnotation            = "ovn.kubernetes.io/chassis"
 	VMAnnotation                 = "ovn.kubernetes.io/virtualmachine"
 	ActivationStrategyAnnotation = "ovn.kubernetes.io/activation_strategy"
+	IPFamilyAnnotation           = "ovn.kubernetes.io/ip_family"
+	IPFamilyIPv4                 = "ipv4"
+	IPFamilyIPv6                 = "ipv6"
 
 	VpcNatGatewayAnnotation                 = "ovn.kubernetes.io/vpc_nat_gw"
 	VpcNatGatewayAnnotationTemplate         = "%s.kubernetes.io/vpc_nat_gw"

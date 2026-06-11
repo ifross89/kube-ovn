@@ -1,4 +1,3 @@
-# syntax = docker/dockerfile:experimental
 ARG VERSION
 ARG BASE_TAG=$VERSION
 FROM kubeovn/kube-ovn-base:$BASE_TAG AS setcap
@@ -23,7 +22,8 @@ RUN ln -s /kube-ovn/kube-ovn-cmd /kube-ovn/kube-ovn-monitor && \
 
 FROM kubeovn/kube-ovn-base:$BASE_TAG
 
-COPY --chmod=0644 logrotate/* /etc/logrotate.d/
+COPY logrotate/* /etc/logrotate.d/
+RUN chmod 0644 /etc/logrotate.d/*
 COPY grace_stop_ovn_controller /usr/share/ovn/scripts/grace_stop_ovn_controller
 
 COPY --from=setcap /kube-ovn /kube-ovn
