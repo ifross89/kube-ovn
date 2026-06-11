@@ -16,11 +16,12 @@ import (
 )
 
 var (
-	ErrOutOfRange  = errors.New("AddressOutOfRange")
-	ErrConflict    = errors.New("AddressConflict")
-	ErrNoAvailable = errors.New("NoAvailableAddress")
-	ErrNoSubnet    = errors.New("NoSubnet")
-	ErrInvalidCIDR = errors.New("CIDRInvalid")
+	ErrOutOfRange       = errors.New("AddressOutOfRange")
+	ErrConflict         = errors.New("AddressConflict")
+	ErrNoAvailable      = errors.New("NoAvailableAddress")
+	ErrNoSubnet         = errors.New("NoSubnet")
+	ErrInvalidCIDR      = errors.New("CIDRInvalid")
+	ErrIPFamilyMismatch = errors.New("IPFamilyMismatch")
 )
 
 type IPAM struct {
@@ -41,7 +42,7 @@ func NewIPAM() *IPAM {
 	}
 }
 
-func (ipam *IPAM) GetRandomAddress(podName, nicName string, mac *string, subnetName, poolName string, skippedAddrs []string, checkConflict bool) (string, string, string, error) {
+func (ipam *IPAM) GetRandomAddress(podName, nicName string, mac *string, subnetName, poolName string, skippedAddrs []string, checkConflict bool, ipFamily string) (string, string, string, error) {
 	ipam.mutex.Lock()
 	defer ipam.mutex.Unlock()
 	var v4, v6 string
@@ -50,7 +51,7 @@ func (ipam *IPAM) GetRandomAddress(podName, nicName string, mac *string, subnetN
 		return "", "", "", ErrNoSubnet
 	}
 
-	v4IP, v6IP, macStr, err := subnet.GetRandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict)
+	v4IP, v6IP, macStr, err := subnet.GetRandomAddress(poolName, podName, nicName, mac, skippedAddrs, checkConflict, ipFamily)
 	if v4IP != nil {
 		v4 = v4IP.String()
 	}
@@ -65,7 +66,7 @@ func (ipam *IPAM) GetRandomAddress(podName, nicName string, mac *string, subnetN
 	return v4, v6, macStr, err
 }
 
-func (ipam *IPAM) GetStaticAddress(podName, nicName, ip string, mac *string, subnetName string, checkConflict bool) (string, string, string, error) {
+func (ipam *IPAM) GetStaticAddress(podName, nicName, ip string, mac *string, subnetName string, checkConflict bool, ipFamily string) (string, string, string, error) {
 	ipam.mutex.Lock()
 	defer ipam.mutex.Unlock()
 	var subnet *Subnet
@@ -75,33 +76,48 @@ func (ipam *IPAM) GetStaticAddress(podName, nicName, ip string, mac *string, sub
 		return "", "", "", ErrNoSubnet
 	}
 
-	var ips []IP
-	var err error
-	var ipAddr IP
-	var v4, v6, macStr string
-	for ipStr := range strings.SplitSeq(ip, ",") {
-		ip, err := NewIP(ipStr)
+	ipStrs := strings.Split(ip, ",")
+	parsedIPs := make([]IP, 0, len(ipStrs))
+	for _, ipStr := range ipStrs {
+		ipAddr, err := NewIP(ipStr)
 		if err != nil {
 			klog.Errorf("failed to parse ip %s", ipStr)
 			return "", "", "", err
 		}
+		if ipFamily != "" && util.IPFamilyOf(ipStr) != ipFamily {
+			klog.Errorf("static ip %s does not match the requested ip family %s for %s", ipStr, ipFamily, podName)
+			return "", "", "", ErrIPFamilyMismatch
+		}
+		parsedIPs = append(parsedIPs, ipAddr)
+	}
+
+	var allocatedIPs []IP
+	var err error
+	var ipAddr IP
+	var v4, v6, macStr string
+	for i, ip := range parsedIPs {
+		ipStr := ipStrs[i]
 		ipAddr, macStr, err = subnet.GetStaticAddress(podName, nicName, ip, mac, false, checkConflict)
 		if err != nil {
 			klog.Errorf("failed to allocate static ip %s for %s", ipStr, podName)
-			if len(ips) != 0 {
+			if len(allocatedIPs) != 0 {
 				// release allocated ips if any
 				subnet.ReleaseAddressWithNicName(podName, nicName)
 			}
 			return "", "", "", err
 		}
 		klog.Infof("allocate static ip %s, mac %s for %s from subnet %s", ipStr, macStr, podName, subnetName)
-		ips = append(ips, ipAddr)
+		allocatedIPs = append(allocatedIPs, ipAddr)
 	}
-	ips, err = checkAndAppendIpsForDual(ips, macStr, podName, nicName, subnet, checkConflict)
+	completedIPs, err := checkAndAppendIpsForDual(allocatedIPs, macStr, podName, nicName, subnet, checkConflict, ipFamily)
 	if err != nil {
-		klog.Errorf("failed to append allocate ip %v mac %v for %s", ips, mac, podName)
+		klog.Errorf("failed to append allocate ip %v mac %v for %s", allocatedIPs, mac, podName)
+		if len(allocatedIPs) != 0 {
+			subnet.ReleaseAddressWithNicName(podName, nicName)
+		}
 		return "", "", "", err
 	}
+	allocatedIPs = completedIPs
 
 	switch subnet.Protocol {
 	case kubeovnv1.ProtocolIPv4:
@@ -111,21 +127,30 @@ func (ipam *IPAM) GetStaticAddress(podName, nicName, ip string, mac *string, sub
 		klog.Infof("allocate v6 %s, mac %s for %s from subnet %s", ip, macStr, podName, subnetName)
 		return "", ip, macStr, err
 	case kubeovnv1.ProtocolDual:
-		if ips[0] != nil {
-			v4 = ips[0].String()
+		for _, ipAddr := range allocatedIPs {
+			if ipAddr == nil {
+				continue
+			}
+			switch util.CheckProtocol(ipAddr.String()) {
+			case kubeovnv1.ProtocolIPv4:
+				v4 = ipAddr.String()
+			case kubeovnv1.ProtocolIPv6:
+				v6 = ipAddr.String()
+			}
 		}
-		if ips[1] != nil {
-			v6 = ips[1].String()
-		}
-		klog.Infof("allocate v4 %s, v6 %s, mac %s for %s from subnet %s", ips[0].String(), ips[1].String(), macStr, podName, subnetName)
+		klog.Infof("allocate v4 %s, v6 %s, mac %s for %s from subnet %s", v4, v6, macStr, podName, subnetName)
 		return v4, v6, macStr, err
 	}
 	return "", "", "", ErrNoAvailable
 }
 
-func checkAndAppendIpsForDual(ips []IP, mac, podName, nicName string, subnet *Subnet, checkConflict bool) ([]IP, error) {
+func checkAndAppendIpsForDual(ips []IP, mac, podName, nicName string, subnet *Subnet, checkConflict bool, ipFamily string) ([]IP, error) {
 	// IP Address for dual-stack should be format of 'IPv4,IPv6'
 	if subnet.Protocol != kubeovnv1.ProtocolDual || len(ips) == 2 {
+		return ips, nil
+	}
+	// When ip_family restricts to a single family, don't auto-allocate the other.
+	if ipFamily != "" {
 		return ips, nil
 	}
 

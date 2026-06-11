@@ -377,7 +377,7 @@ func (c *Controller) InitIPAM() error {
 					mac = ptr.To(lrp.MAC)
 				}
 			}
-			if _, _, _, err = c.ipam.GetStaticAddress(u2oInterconnName, u2oInterconnLrpName, subnet.Status.U2OInterconnectionIP, mac, subnet.Name, true); err != nil {
+			if _, _, _, err = c.ipam.GetStaticAddress(u2oInterconnName, u2oInterconnLrpName, subnet.Status.U2OInterconnectionIP, mac, subnet.Name, true, ""); err != nil {
 				klog.Errorf("failed to init subnet %q u2o interconnection ip to ipam %v", subnet.Name, err)
 			}
 		}
@@ -419,7 +419,10 @@ func (c *Controller) InitIPAM() error {
 		} else {
 			ipamKey = util.NodeLspName(ip.Spec.PodName)
 		}
-		if _, _, _, err = c.ipam.GetStaticAddress(ipamKey, ip.Name, ip.Spec.IPAddress, &ip.Spec.MacAddress, ip.Spec.Subnet, true); err != nil {
+		// restore exactly what is recorded in the IP CR: a single-family record in a
+		// dual-stack subnet is legitimate when the pod restricts its ip family, and
+		// no address of the other family must be allocated for it
+		if _, _, _, err = c.ipam.GetStaticAddress(ipamKey, ip.Name, ip.Spec.IPAddress, &ip.Spec.MacAddress, ip.Spec.Subnet, true, util.IPFamilyOf(ip.Spec.IPAddress)); err != nil {
 			klog.Errorf("failed to init IPAM from IP CR %s: %v", ip.Name, err)
 		}
 	}
@@ -459,7 +462,9 @@ func (c *Controller) InitIPAM() error {
 					klog.Warningf("pod %s/%s has empty IP annotation for provider %s, skip IPAM init", pod.Namespace, podName, podNet.ProviderName)
 					continue
 				}
-				_, _, _, err := c.ipam.GetStaticAddress(key, portName, ip, &mac, podNet.Subnet.Name, true)
+				// derive the ip family from the recorded address rather than the pod's
+				// ip_family annotation so that restore never allocates a new address
+				_, _, _, err := c.ipam.GetStaticAddress(key, portName, ip, &mac, podNet.Subnet.Name, true, util.IPFamilyOf(ip))
 				if err != nil {
 					klog.Errorf("failed to init pod %s.%s address %s: %v", podName, pod.Namespace, ip, err)
 				} else {
@@ -487,7 +492,7 @@ func (c *Controller) InitIPAM() error {
 			continue
 		}
 		portName := ovs.PodNameToPortName(vip.Name, vip.Spec.Namespace, provider)
-		if _, _, _, err = c.ipam.GetStaticAddress(vip.Name, portName, vip.Status.V4ip, &vip.Status.Mac, vip.Spec.Subnet, true); err != nil {
+		if _, _, _, err = c.ipam.GetStaticAddress(vip.Name, portName, vip.Status.V4ip, &vip.Status.Mac, vip.Spec.Subnet, true, ""); err != nil {
 			klog.Errorf("failed to init ipam from vip cr %s: %v", vip.Name, err)
 		}
 	}
@@ -500,7 +505,7 @@ func (c *Controller) InitIPAM() error {
 	}
 	for _, eip := range eips {
 		externalNetwork := util.GetExternalNetwork(eip.Spec.ExternalSubnet)
-		if _, _, _, err = c.ipam.GetStaticAddress(eip.Name, eip.Name, eip.Status.IP, &eip.Spec.MacAddress, externalNetwork, true); err != nil {
+		if _, _, _, err = c.ipam.GetStaticAddress(eip.Name, eip.Name, eip.Status.IP, &eip.Spec.MacAddress, externalNetwork, true, ""); err != nil {
 			klog.Errorf("failed to init ipam from iptables eip cr %s: %v", eip.Name, err)
 		}
 	}
@@ -512,7 +517,7 @@ func (c *Controller) InitIPAM() error {
 		return err
 	}
 	for _, oeip := range oeips {
-		if _, _, _, err = c.ipam.GetStaticAddress(oeip.Name, oeip.Name, oeip.Status.V4Ip, &oeip.Status.MacAddress, oeip.Spec.ExternalSubnet, true); err != nil {
+		if _, _, _, err = c.ipam.GetStaticAddress(oeip.Name, oeip.Name, oeip.Status.V4Ip, &oeip.Status.MacAddress, oeip.Spec.ExternalSubnet, true, ""); err != nil {
 			klog.Errorf("failed to init ipam from ovn eip cr %s: %v", oeip.Name, err)
 		}
 	}
@@ -529,7 +534,7 @@ func (c *Controller) InitIPAM() error {
 			mac := node.Annotations[util.MacAddressAnnotation]
 			v4IP, v6IP, _, err := c.ipam.GetStaticAddress(portName, portName,
 				node.Annotations[util.IPAddressAnnotation], &mac,
-				node.Annotations[util.LogicalSwitchAnnotation], true)
+				node.Annotations[util.LogicalSwitchAnnotation], true, "")
 			if err != nil {
 				klog.Errorf("failed to init node %s.%s address %s: %v", node.Name, node.Namespace, node.Annotations[util.IPAddressAnnotation], err)
 			}

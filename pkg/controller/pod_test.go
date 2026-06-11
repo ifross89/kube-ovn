@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"math/big"
 	"testing"
 
 	nadv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
@@ -12,6 +13,7 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
+	"github.com/kubeovn/kube-ovn/pkg/internal"
 	"github.com/kubeovn/kube-ovn/pkg/ipam"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
@@ -432,7 +434,7 @@ func TestAcquireAddressWithSpecifiedSubnet(t *testing.T) {
 				},
 			},
 			setupIPAM: func(c *Controller) {
-				_, _, _, _ = c.ipam.GetStaticAddress("other-pod.default", "other-pod.default", "10.0.1.10", nil, "subnet1", true)
+				_, _, _, _ = c.ipam.GetStaticAddress("other-pod.default", "other-pod.default", "10.0.1.10", nil, "subnet1", true, "")
 			},
 			expectError: true,
 			description: "Should NOT fallback to subnet2 when IP is occupied in specified subnet1",
@@ -529,6 +531,133 @@ func newIPAMForTest(subnets []*kubeovnv1.Subnet) *ipam.IPAM {
 		ipamInstance.Subnets[subnet.Name] = s
 	}
 	return ipamInstance
+}
+
+func testBigInt(value int64) internal.BigInt {
+	return internal.BigInt{Int: *big.NewInt(value)}
+}
+
+func TestAcquireAddressWithIPFamilyUsesSingleFamilyNamespaceIPPool(t *testing.T) {
+	subnet := &kubeovnv1.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "dual-subnet"},
+		Spec: kubeovnv1.SubnetSpec{
+			CIDRBlock: "10.0.0.0/24,2001:db8::/64",
+			Gateway:   "10.0.0.1,2001:db8::1",
+			Protocol:  kubeovnv1.ProtocolDual,
+			Provider:  util.OvnProvider,
+		},
+		Status: kubeovnv1.SubnetStatus{
+			V4AvailableIPs: 1,
+			V6AvailableIPs: 0,
+		},
+	}
+	ippool := &kubeovnv1.IPPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "v4-pool"},
+		Spec: kubeovnv1.IPPoolSpec{
+			Subnet: "dual-subnet",
+			IPs:    []string{"10.0.0.10"},
+		},
+		Status: kubeovnv1.IPPoolStatus{
+			V4AvailableIPs: testBigInt(1),
+			V6AvailableIPs: testBigInt(0),
+		},
+	}
+	namespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default",
+			Annotations: map[string]string{
+				util.LogicalSwitchAnnotation: "dual-subnet",
+				util.IPPoolAnnotation:        "v4-pool",
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod",
+			Namespace: "default",
+			Annotations: map[string]string{
+				util.IPFamilyAnnotation: util.IPFamilyIPv4,
+			},
+		},
+	}
+
+	fakeController, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+		Namespaces: []*corev1.Namespace{namespace},
+		Subnets:    []*kubeovnv1.Subnet{subnet},
+		IPPools:    []*kubeovnv1.IPPool{ippool},
+		Pods:       []*corev1.Pod{pod},
+	})
+	require.NoError(t, err)
+	controller := fakeController.fakeController
+	controller.ipam = newIPAMForTest([]*kubeovnv1.Subnet{subnet})
+	require.NoError(t, controller.ipam.AddOrUpdateIPPool("dual-subnet", "v4-pool", []string{"10.0.0.10"}))
+
+	podNets, err := controller.getPodKubeovnNets(pod)
+	require.NoError(t, err)
+	require.Len(t, podNets, 1)
+
+	v4IP, v6IP, _, allocatedSubnet, err := controller.acquireAddress(pod, podNets[0])
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.10", v4IP)
+	require.Empty(t, v6IP)
+	require.Equal(t, "dual-subnet", allocatedSubnet.Name)
+}
+
+func TestAcquireAddressWithIPFamilyFiltersVIP(t *testing.T) {
+	subnet := &kubeovnv1.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "dual-subnet"},
+		Spec: kubeovnv1.SubnetSpec{
+			CIDRBlock: "10.0.0.0/24,2001:db8::/64",
+			Protocol:  kubeovnv1.ProtocolDual,
+			Provider:  util.OvnProvider,
+		},
+	}
+	vip := &kubeovnv1.Vip{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "vip",
+			Labels: map[string]string{
+				util.IPReservedLabel: "",
+			},
+		},
+		Spec: kubeovnv1.VipSpec{
+			Namespace: "default",
+			Subnet:    "dual-subnet",
+		},
+		Status: kubeovnv1.VipStatus{
+			V4ip: "10.0.0.20",
+			V6ip: "2001:db8::20",
+			Mac:  "00:00:00:00:00:01",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pod",
+			Namespace: "default",
+			Annotations: map[string]string{
+				util.VipAnnotation:      "vip",
+				util.IPFamilyAnnotation: util.IPFamilyIPv4,
+			},
+		},
+	}
+
+	fakeController, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+		Subnets: []*kubeovnv1.Subnet{subnet},
+		Vips:    []*kubeovnv1.Vip{vip},
+		Pods:    []*corev1.Pod{pod},
+	})
+	require.NoError(t, err)
+	controller := fakeController.fakeController
+	podNet := &kubeovnNet{
+		ProviderName: util.OvnProvider,
+		Subnet:       subnet,
+		IsDefault:    true,
+	}
+
+	v4IP, v6IP, mac, _, err := controller.acquireAddress(pod, podNet)
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.20", v4IP)
+	require.Empty(t, v6IP)
+	require.Equal(t, "00:00:00:00:00:01", mac)
 }
 
 func TestGetNamedPortByNsReturnsCopy(t *testing.T) {

@@ -358,6 +358,18 @@ func ValidatePodNetwork(annotations map[string]string) error {
 		}
 	}
 
+	if ipFamily := annotations[IPFamilyAnnotation]; ipFamily != "" {
+		if ipFamily != IPFamilyIPv4 && ipFamily != IPFamilyIPv6 {
+			errors = append(errors, fmt.Errorf("%q is not a valid %s, must be ipv4 or ipv6", ipFamily, IPFamilyAnnotation))
+		} else if ipAddress := annotations[IPAddressAnnotation]; ipAddress != "" {
+			for ip := range strings.SplitSeq(ipAddress, ",") {
+				if IPFamilyOf(ip) != ipFamily {
+					errors = append(errors, fmt.Errorf("ip address %s conflicts with %s %s", ip, IPFamilyAnnotation, ipFamily))
+				}
+			}
+		}
+	}
+
 	return utilerrors.NewAggregate(errors)
 }
 
